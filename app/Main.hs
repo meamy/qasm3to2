@@ -4,6 +4,7 @@ import Ast qualified
 import Chatty
 import Control.Monad
 import Data.Either
+import Data.Functor
 import Qasm2 qualified as Q2
 import Qasm3.Lexer qualified as Q3L
 import Qasm3.Parser qualified as Q3P
@@ -43,13 +44,8 @@ main = do
   let filename = head fileList
   flag <- doesFileExist filename
   unless flag (error ("File not found: " ++ filename))
-  text <- readFile filename
-  let res =
-        ( do
-            q3Parse <- Q3P.parseString text
-            sg <- Q3G.semanticGraphFrom $ Q3S.syntaxTreeFrom q3Parse
-            fromQasm3 sg
-        )
+  !text <- readFile filename
+  let !res = Q3P.parseString text <&> Q3S.syntaxTreeFrom <&> Q3S.decorateIDs
   case res of
-    ChattyFailure msgs (Failure msg) -> putStrLn (unlines msgs ++ msg) >>= error msg
-    ChattyValue msgs ast -> putStr $ Q2.pretty ast
+    ChattyFailure msgs (Failure msg) -> putStrLn $ (concat msgs ++ msg)
+    ChattyValue msgs ast -> putStrLn $ Q3S.pretty ast

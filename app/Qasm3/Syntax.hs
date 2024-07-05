@@ -17,6 +17,7 @@ module Qasm3.Syntax
     tokenVersionMajMin,
     tokenStringVal,
     tokenStr,
+    decorateIDs,
   )
 where
 
@@ -27,6 +28,8 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import Debug.Trace (trace)
 import Numeric
 import Text.Read (readMaybe)
+
+import Control.Monad.State.Lazy
 
 type ParseNode = Ast.Node Tag SourceRef
 
@@ -421,6 +424,38 @@ syntaxTreeFrom (Ast.Node binop@(BinaryOperatorExpr _) [exprA, exprB] _) =
 syntaxTreeFrom (Ast.Node (BinaryOperatorExpr _) children _) = undefined
 -- Pass everything else through untouched
 syntaxTreeFrom (Ast.Node tag children _) = Ast.Node tag (map syntaxTreeFrom children) ()
+
+-- Adds unique id nuumbers to each node for identification
+decorateIDs :: Ast.Node Tag c -> Ast.Node Tag Int
+decorateIDs node = evalState (go node) 0 where
+  go NilNode = return NilNode
+  go (Ast.Node t stmts _) = do
+    i <- get
+    modify (+1)
+    stmts' <- mapM go stmts
+    return (Ast.Node t stmts' i)
+
+data Decl = Decl String [String] [String] (Ast.Node Tag c) deriving (Show)
+
+getIdent :: Ast.Node Tag c -> String
+getIdent (Ast.Node (Identifier name _) _ _) = name
+getIdent _ = error "Not an identifier..."
+
+-- Inlines all gate calls
+inlineGateCalls :: Ast.Node Tag c -> Ast.Node Tag c
+inlineGateCalls node = evalState (go node) Map.empty where
+  go (Ast.Node GateStmt [ident, params, args, stmts] _) = do
+    modify (\ctx -> Map.insert (getIdent ident) $ Decl (getIdent ident) (map getIdent params) (map getIdent args) stmts)
+pretty (Ast.Node GateCallStmt [modifiers, target, params, maybeTime, gateArgs] _) =
+  ( case modifiers of
+      Ast.NilNode -> ""
+      Ast.Node {children = cs} -> concatMap ((++ " ") . pretty) cs
+  )
+    ++ pretty target
+    ++ prettyMaybeList "(" params ")"
+    ++ prettyMaybe "[" maybeTime "]"
+    ++ prettyMaybeList " " gateArgs ""
+    ++ ";"
 
 parenthesizeNonTrivialExpr :: Node Tag c -> Node Tag c
 parenthesizeNonTrivialExpr expr =
