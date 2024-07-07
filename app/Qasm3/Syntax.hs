@@ -18,6 +18,7 @@ module Qasm3.Syntax
     tokenStringVal,
     tokenStr,
     decorateIDs,
+    inlineGateCalls,
   )
 where
 
@@ -25,6 +26,8 @@ import Ast
 import Data.Char
 import Data.List (intercalate, stripPrefix)
 import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Map (Map, (!))
+import qualified Data.Map as Map
 import Debug.Trace (trace)
 import Numeric
 import Text.Read (readMaybe)
@@ -435,27 +438,70 @@ decorateIDs node = evalState (go node) 0 where
     stmts' <- mapM go stmts
     return (Ast.Node t stmts' i)
 
-data Decl = Decl String [String] [String] (Ast.Node Tag c) deriving (Show)
+data Decl c = Decl String [String] [String] (Ast.Node Tag c) deriving (Show)
 
 getIdent :: Ast.Node Tag c -> String
 getIdent (Ast.Node (Identifier name _) _ _) = name
 getIdent _ = error "Not an identifier..."
 
--- Inlines all gate calls
+getList :: Ast.Node Tag c -> [Ast.Node Tag c]
+getList NilNode = []
+getList (Ast.Node List stmts _) = stmts
+getList _ = error "Not a list..."
+
+-- Applies substitutions
+subst :: Map String (Ast.Node Tag c) -> Ast.Node Tag c -> Ast.Node Tag c
+subst substs node = case node of
+  NilNode                                                     -> NilNode
+  (Ast.Node (Identifier name _) _ _) | Map.member name substs -> substs!name
+  (Ast.Node tag stmts c)                                      -> Ast.Node tag (map (subst substs) stmts) c
+
+-- Makes a basic gate call
+makeBasicCall :: String -> [Ast.Node Tag c] -> c -> Ast.Node Tag c
+makeBasicCall name args c =
+  let target  = Ast.Node (Identifier name (IdentifierToken name)) [] c
+      argList = Ast.Node List args c
+  in
+    Ast.Node GateCallStmt [NilNode, target, NilNode, NilNode, argList] c
+
+-- Inlines all gate declarations
 inlineGateCalls :: Ast.Node Tag c -> Ast.Node Tag c
 inlineGateCalls node = evalState (go node) Map.empty where
-  go (Ast.Node GateStmt [ident, params, args, stmts] _) = do
-    modify (\ctx -> Map.insert (getIdent ident) $ Decl (getIdent ident) (map getIdent params) (map getIdent args) stmts)
-pretty (Ast.Node GateCallStmt [modifiers, target, params, maybeTime, gateArgs] _) =
-  ( case modifiers of
-      Ast.NilNode -> ""
-      Ast.Node {children = cs} -> concatMap ((++ " ") . pretty) cs
-  )
-    ++ pretty target
-    ++ prettyMaybeList "(" params ")"
-    ++ prettyMaybe "[" maybeTime "]"
-    ++ prettyMaybeList " " gateArgs ""
-    ++ ";"
+  go NilNode = return NilNode
+  go node@(Ast.Node GateStmt [ident, params, args, stmts] c) = do
+    stmts' <- go stmts
+    modify (Map.insert (getIdent ident) $ Decl (getIdent ident) (map getIdent $ getList params) (map getIdent $ getList args) stmts')
+    return node
+  go node@(Ast.Node GateCallStmt [modifiers, target, params, maybeTime, gateArgs] c)
+    | getIdent target == "ccx" = do
+        let [x,y,z] = getList gateArgs
+        let gateList = [makeBasicCall "h" [z] c,
+                        makeBasicCall "t" [x] c,
+                        makeBasicCall "t" [y] c,
+                        makeBasicCall "t" [z] c,
+                        makeBasicCall "cx" [x,y] c,
+                        makeBasicCall "cx" [y,z] c,
+                        makeBasicCall "cx" [z,x] c,
+                        makeBasicCall "tdg" [x] c,
+                        makeBasicCall "tdg" [y] c,
+                        makeBasicCall "t" [z] c,
+                        makeBasicCall "cx" [y,x] c,
+                        makeBasicCall "tdg" [x] c,
+                        makeBasicCall "cx" [y,z] c,
+                        makeBasicCall "cx" [z,x] c,
+                        makeBasicCall "cx" [x,y] c,
+                        makeBasicCall "h" [z] c]
+        return $ Ast.Node Scope gateList c
+    | otherwise                = do
+        ctx <- get
+        case Map.lookup (getIdent target) ctx of
+          Nothing                          -> return node
+          Just (Decl _ fparams fargs body) ->
+            let substs = Map.fromList $ (zip fparams $ getList params) ++ (zip fargs $ getList gateArgs) in
+              return $ subst substs body
+  go (Ast.Node tag children c) = do
+    children' <- mapM go children
+    return $ Ast.Node tag children' c
 
 parenthesizeNonTrivialExpr :: Node Tag c -> Node Tag c
 parenthesizeNonTrivialExpr expr =
