@@ -48,4 +48,6 @@ main = do
   let !res = Q3P.parseString text <&> Q3S.syntaxTreeFrom <&> Q3S.inlineGateCalls <&> Q3S.decorateIDs
   case res of
     ChattyFailure msgs (Failure msg) -> putStrLn $ (concat msgs ++ msg)
-    ChattyValue msgs ast -> putStrLn $ Q3S.pretty ast
+    ChattyValue msgs ast -> do
+      putStrLn $ Q3S.pretty ast
+      putStrLn $ show (Q3S.buildModel ast)

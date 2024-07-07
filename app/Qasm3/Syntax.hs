@@ -19,6 +19,7 @@ module Qasm3.Syntax
     tokenStr,
     decorateIDs,
     inlineGateCalls,
+    buildModel,
   )
 where
 
@@ -264,6 +265,65 @@ data Tag
   | List -- [element..]
   deriving (Eq, Read, Show)
 
+-- Porting over from Feynman to experiment before integrating
+type ID = String
+
+data Primitive =
+    H        ID
+  | X        ID
+  | Y        ID
+  | Z        ID
+  | CNOT     ID ID
+  | CZ       ID ID
+  | S        ID
+  | Sinv     ID
+  | T        ID
+  | Tinv     ID
+  | Swap     ID ID
+  | Rz       Double ID
+  | Rx       Double ID
+  | Ry       Double ID
+  | Uninterp ID [ID]
+  deriving (Eq)
+
+instance Show Primitive where
+  show (H x)           = "H " ++ x
+  show (X x)           = "X " ++ x
+  show (Z x)           = "Z " ++ x
+  show (Y x)           = "Y " ++ x
+  show (CNOT x y)      = "CNOT " ++ x ++ " " ++ y
+  show (CZ x y)        = "CZ " ++ x ++ " " ++ y
+  show (S x)           = "S " ++ x
+  show (Sinv x)        = "S* " ++ x
+  show (T x)           = "T " ++ x
+  show (Tinv x)        = "T* " ++ x
+  show (Swap x y)      = "Swap " ++ x ++ " " ++ y
+  show (Rz theta x)    = "Rz(" ++ show theta ++ ") " ++ x
+  show (Rx theta x)    = "Rx(" ++ show theta ++ ") " ++ x
+  show (Ry theta x)    = "Ry(" ++ show theta ++ ") " ++ x
+  show (Uninterp s xs) = s ++ concatMap (" " ++) xs
+
+data WStmt a =
+    WSkip a
+  | WGate a Primitive
+  | WSeq a [WStmt a]
+  | WReset a ID
+  | WMeasure a ID
+  | WIf a (WStmt a) (WStmt a)
+  | WWhile a (WStmt a)
+
+instance Show a => Show (WStmt a) where
+  show stmt = intercalate "\n" $ go stmt where
+    go :: (WStmt a) -> [String]
+    go (WSkip _)      = ["SKIP"]
+    go (WGate _ gate) = [show gate]
+    go (WSeq _ xs)    = concatMap go xs
+    go (WReset _ v)   = ["RESET " ++ show v]
+    go (WMeasure _ v) = ["* <- MEASURE " ++ show v]
+    go (WIf _ s1 s2)  = ["IF * THEN:"] ++ (map ('\t':) $ go s1)
+                        ++ ["ELSE:"] ++ (map ('\t':) $ go s2)
+    go (WWhile _ s)   = ["WHILE *:"] ++ (map ('\t':) $ go s)
+
 -- Convert the syntax tree back into a string form that can be parsed into an
 -- equivalent tree
 pretty :: (Show c) => Ast.Node Tag c -> String
@@ -502,6 +562,87 @@ inlineGateCalls node = evalState (go node) Map.empty where
   go (Ast.Node tag children c) = do
     children' <- mapM go children
     return $ Ast.Node tag children' c
+
+-- Builds a model of the program as a non-deterministic WHILE program
+buildModel :: Ast.Node Tag Int -> WStmt Int
+buildModel node = evalState (go node) () where
+  go :: Ast.Node Tag Int -> State () (WStmt Int)
+  go NilNode = return $ WSkip (-1)
+  go (Ast.Node tag children c) = case tag of
+    Program _ _ _ -> mapM go children >>= return . WSeq c
+    Statement  -> go (children!!0)
+    Scope      -> mapM go children >>= return . WSeq c
+  -- <StatementContent>
+      -- [Identifier, Expression..]
+    AliasDeclStmt -> trace "Unimplemented (alias stmt)" $ return $ WSkip c
+      -- [IndexedIdentifier, (Expression | MeasureExpr)]
+    AssignmentStmt _ -> return $ WSkip c
+      -- [(HardwareQubit | IndexedIdentifier)..]
+    BarrierStmt -> trace "Unimplemented (barrier stmt)" $ return $ WSkip c
+    BoxStmt    -> go (children!!1)
+      -- []
+    BreakStmt -> trace "Unimplemented (break stmt)" $ return $ WSkip c
+      -- [ScalarTypeSpec, Identifier, DeclarationExpr]
+    ConstDeclStmt -> trace "Unimplemented (const decl)" $ return $ WSkip c
+      -- []
+    ContinueStmt -> trace "Unimplemented (continue)" $ return $ WSkip c
+      -- [Identifier, List<ArgumentDefinition>, ScalarTypeSpec?, Scope]
+    DefStmt -> trace "Unimplemented (def stmt)" $ return $ WSkip c
+      -- []
+    EndStmt -> trace "Unimplemented (end stmt)" $ return $ WSkip c
+      -- [expr]
+    ExpressionStmt -> mapM go children >>= return . WSeq c
+      -- [Identifier, List<ScalarTypeSpec>, returnTypeSpec::ScalarTypeSpec?]
+    ExternStmt -> trace "Unimplemented (extern stmt)" $ return $ WSkip c
+      -- [ScalarTypeSpec, Identifier, (Expression | Range | Set), (Statement | Scope)]
+    ForStmt -> trace "Unimplemented (for stmt)" $ return $ WSkip c
+      -- [Identifier, List<Identifier>?, List<Identifier>, Scope]
+    GateStmt -> trace "Unimplemented (gate dec stmt)" $ return $ WSkip c
+      -- [modifiers::List<GateModifier>, target::Identifier, params::List<Expression>?, designator::Expression?, args::List<(HardwareQubit | IndexedIdentifier)>?]
+    GateCallStmt -> trace "Unimplemented (gate call stmt)" $ return $ WSkip c
+      -- [condition::Expression, thenBlock::(Statement | Scope), elseBlock::(Statement | Scope)?
+    IfStmt -> trace "Unimplemented (if stmt)" $ return $ WSkip c
+      -- [(HardwareQubit | IndexedIdentifier), IndexedIdentifier?]
+    MeasureArrowAssignmentStmt -> trace "Unimplemented (measure stmt)" $ return $ WSkip c
+      -- [Identifier, designator::Expression?]
+    QregOldStyleDeclStmt -> trace "Unimplemented (qreg stmt)" $ return $ WSkip c
+      -- [QubitTypeSpec, Identifier]
+    QuantumDeclStmt -> trace "Unimplemented (qdec stmt)" $ return $ WSkip c
+      -- [(HardwareQubit | IndexedIdentifier)]
+    ResetStmt -> trace "Unimplemented (reset stmt)" $ return $ WSkip c
+      -- [(Expression | MeasureExpr)?]
+    ReturnStmt -> trace "Unimplemented (return stmt)" $ return $ WSkip c
+      -- [Expression, (Statement | Scope)]
+    WhileStmt -> trace "Unimplemented (while stmt)" $ return $ WSkip c
+  -- <Expression>
+      -- [Expression]
+    ParenExpr -> go (children!!0)
+      -- [Expression, (List<RangeInitExpr | Expression> | SetInitExpr)]
+    IndexExpr -> go (children!!0)
+      -- [Expression]
+    UnaryOperatorExpr _ -> go (children!!0)
+      -- [left::Expression, right::Expression]
+    BinaryOperatorExpr _ -> mapM go children >>= return . WSeq c
+      -- [(ScalarTypeSpec | ArrayTypeSpec), Expression]
+    CastExpr -> go (children!!1)
+      -- [Scope]
+    DurationOfExpr -> go (children!!0)
+      -- [Identifier, List<ExpressionNode>]
+    CallExpr -> trace "Unimplemented (call expr)" $ return $ WSkip c
+  --   Array only allowed in array initializers
+      -- [elements::Expression..]
+    ArrayInitExpr -> go (children!!0)
+  --   Set, Range only allowed in (some) indexing expressions
+      -- [elements::Expression..]
+    SetInitExpr -> go (children!!0)
+      -- [begin::Expression?, step::Expression?, end::Expression?]
+    RangeInitExpr -> mapM go children >>= return . WSeq c
+  --   Dim only allowed in (some) array arg definitions
+      -- [expr]
+    MeasureExpr -> trace "Unimplemented (measure expr)" $ return $ WSkip c
+      -- [element..]
+    List -> mapM go children >>= return . WSeq c
+    _ -> return $ WSkip c
 
 parenthesizeNonTrivialExpr :: Node Tag c -> Node Tag c
 parenthesizeNonTrivialExpr expr =
