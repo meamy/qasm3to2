@@ -45,7 +45,7 @@ main = do
   flag <- doesFileExist filename
   unless flag (error ("File not found: " ++ filename))
   !text <- readFile filename
-  let !res = Q3P.parseString text <&> Q3S.syntaxTreeFrom <&> Q3S.inlineGateCalls <&> Q3S.decorateIDs
+  let !res = Q3P.parseString text <&> Q3S.syntaxTreeFrom <&> Q3S.inlineGateCalls <&> Q3S.unrollLoops <&> Q3S.decorateIDs
   case res of
     ChattyFailure msgs (Failure msg) -> putStrLn $ (concat msgs ++ msg)
     ChattyValue msgs ast -> do
